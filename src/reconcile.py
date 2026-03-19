@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -20,6 +21,7 @@ class ReconcileError(Exception):
 
 def normalize_doc_content(content: str) -> str:
     return content if content.endswith("\n") else content + "\n"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Mini Reconciler proof-of-concept")
@@ -169,8 +171,9 @@ def run_normal_mode(desired: Dict[str, str], out_root: Path) -> None:
 
 
 def run_reset_mode(desired: Dict[str, str], out_root: Path) -> None:
-    # v0 reset mode is an explicit mutation surface, but it still preserves manual files
-    # by only rewriting the managed files in each desired unit directory.
+    # INTENTIONAL FAILURE DEMO:
+    # Reset mode now destructively replaces desired unit directories.
+    # This will remove manual.txt and should fail MC-RST-1 / MC-GLOB-1.
     existing = existing_unit_dirs(out_root)
 
     stale_ids = sorted(set(existing) - set(desired))
@@ -179,6 +182,11 @@ def run_reset_mode(desired: Dict[str, str], out_root: Path) -> None:
         raise ReconcileError(
             f"Stale units exist while deletions are disabled: {stale_list}"
         )
+
+    for unit_id in desired:
+        unit_dir = out_root / unit_id
+        if unit_dir.exists():
+            shutil.rmtree(unit_dir)
 
     apply_desired_units(desired, out_root)
     handle_stale_units(existing_unit_dirs(out_root), desired)
