@@ -1,0 +1,190 @@
+manifest_version: "0.2"
+
+contract:
+  contract_id: "mini-reconciler-convergence"
+  contract_version: "0.2"
+  contract_file: "contract/contract-v0.2.md"
+
+paths:
+  desired_state: "input/desired_state.json"
+  output_root: "out"
+  fixtures_root: "fixtures"
+  ci_workflow_glob: ".github/workflows/*.y*ml"
+
+policy:
+  fail_on_block: true
+  default_deletions_enabled: false
+  deletion_env_var: "MINI_RECONCILER_ALLOW_DELETIONS"
+
+domain:
+  managed_files:
+    - "doc.txt"
+    - "meta.json"
+  canonical_manual_file: "manual.txt"
+  required_surfaces:
+    - "delete"
+    - "overwrite"
+    - "reset"
+
+reporting:
+  emit_json_summary: true
+  print_clause_results: true
+  fail_process_on_block: true
+
+clauses:
+  - clause_id: "MC-OWN-1"
+    title: "Managed scope is limited to doc.txt and meta.json"
+    severity: "BLOCK"
+    normative: "The reconciler manages only doc.txt and meta.json within a Unit Directory."
+    check:
+      check_id: "check_managed_scope"
+      type: "path-scope"
+      mode: "deterministic"
+      params:
+        managed_files:
+          - "doc.txt"
+          - "meta.json"
+        output_root: "out"
+        canonical_manual_file: "manual.txt"
+
+  - clause_id: "MC-DEL-1"
+    title: "Delete preserves manual.txt"
+    severity: "BLOCK"
+    normative: "If deletions are enabled and a stale unit contains manual.txt, managed files may be removed but manual.txt MUST remain."
+    surfaces:
+      - "delete"
+    check:
+      check_id: "check_delete_preserves_manual"
+      type: "fixture-state-compare"
+      mode: "deterministic"
+      fixture_id: "fx_delete_preserves_manual"
+      params:
+        preserve_manual_file: "manual.txt"
+        allow_managed_removal: true
+
+  - clause_id: "MC-OVR-1"
+    title: "Overwrite preserves manual.txt"
+    severity: "BLOCK"
+    normative: "When an existing desired unit is re-exported, managed files may change but manual.txt MUST remain unchanged."
+    surfaces:
+      - "overwrite"
+    check:
+      check_id: "check_overwrite_preserves_manual"
+      type: "fixture-state-compare"
+      mode: "deterministic"
+      fixture_id: "fx_overwrite_preserves_manual"
+      params:
+        preserve_manual_file: "manual.txt"
+        require_managed_change: true
+
+  - clause_id: "MC-RST-1"
+    title: "Reset preserves manual.txt"
+    severity: "BLOCK"
+    normative: "Any reset or cleanup path affecting a Unit Directory MUST preserve manual.txt."
+    surfaces:
+      - "reset"
+    check:
+      check_id: "check_reset_preserves_manual"
+      type: "fixture-state-compare"
+      mode: "deterministic"
+      fixture_id: "fx_reset_preserves_manual"
+      params:
+        preserve_manual_file: "manual.txt"
+
+  - clause_id: "MC-POL-1"
+    title: "Stale units block when deletions are disabled"
+    severity: "BLOCK"
+    normative: "If deletions are disabled and any stale unit exists, the run MUST fail with exit code 1."
+    check:
+      check_id: "check_stale_blocked_when_deletions_disabled"
+      type: "fixture-exit-code"
+      mode: "deterministic"
+      fixture_id: "fx_stale_blocked_when_deletions_disabled"
+      params:
+        expected_exit_code: 1
+        deletion_env_var: "MINI_RECONCILER_ALLOW_DELETIONS"
+        required_env_value_for_delete: "true"
+
+  - clause_id: "MC-GLOB-1"
+    title: "Manual preservation is a global cross-surface invariant"
+    severity: "BLOCK"
+    normative: "manual.txt MUST be preserved across delete, overwrite, and reset."
+    surfaces:
+      - "delete"
+      - "overwrite"
+      - "reset"
+    check:
+      check_id: "check_global_manual_preservation"
+      type: "aggregate"
+      mode: "deterministic"
+      requires:
+        - "MC-DEL-1"
+        - "MC-OVR-1"
+        - "MC-RST-1"
+      params:
+        required_surfaces:
+          - "delete"
+          - "overwrite"
+          - "reset"
+        pass_condition: "all_required_surface_checks_pass"
+
+  - clause_id: "MC-CI-1"
+    title: "CI fails on any BLOCK violation"
+    severity: "BLOCK"
+    normative: "CI MUST fail if any BLOCK clause fails."
+    check:
+      check_id: "check_ci_block_behavior"
+      type: "runner-policy"
+      mode: "deterministic"
+      params:
+        fail_on_block: true
+
+  - clause_id: "MC-CI-2"
+    title: "Normal CI runs keep deletions disabled"
+    severity: "BLOCK"
+    normative: "Normal CI runs MUST NOT enable MINI_RECONCILER_ALLOW_DELETIONS=true except in a deletion-specific test job."
+    check:
+      check_id: "check_ci_deletion_safety"
+      type: "ci-config"
+      mode: "deterministic"
+      params:
+        workflow_glob: ".github/workflows/*.y*ml"
+        deletion_env_var: "MINI_RECONCILER_ALLOW_DELETIONS"
+        forbidden_default_value: "true"
+        allowed_job_names:
+          - "deletion-specific-tests"
+
+fixtures:
+  - fixture_id: "fx_delete_preserves_manual"
+    description: "A stale unit contains doc.txt, meta.json, and manual.txt. With deletions enabled, managed files may be removed but manual.txt must remain."
+    expected_result: "PASS"
+    surfaces:
+      - "delete"
+
+  - fixture_id: "fx_overwrite_preserves_manual"
+    description: "An existing desired unit is re-exported. Managed files change. manual.txt must remain unchanged."
+    expected_result: "PASS"
+    surfaces:
+      - "overwrite"
+
+  - fixture_id: "fx_reset_preserves_manual"
+    description: "A reset or cleanup path is exercised. manual.txt must remain unchanged."
+    expected_result: "PASS"
+    surfaces:
+      - "reset"
+
+  - fixture_id: "fx_stale_blocked_when_deletions_disabled"
+    description: "A stale unit exists while deletions are disabled. The run must fail with exit code 1."
+    expected_result: "FAIL"
+    surfaces:
+      - "delete"
+
+execution_order:
+  - "MC-OWN-1"
+  - "MC-DEL-1"
+  - "MC-OVR-1"
+  - "MC-RST-1"
+  - "MC-POL-1"
+  - "MC-GLOB-1"
+  - "MC-CI-1"
+  - "MC-CI-2"
