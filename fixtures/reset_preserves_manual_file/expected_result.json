@@ -1,0 +1,13 @@
+{
+  "expected_exit_code": 0,
+  "run_args": [
+    "--mode",
+    "reset"
+  ],
+  "env": {},
+  "covers_clauses": [
+    "MC-RST-1",
+    "MC-GLOB-1"
+  ],
+  "notes": "Reset logic must preserve manual.txt."
+}

@@ -1,0 +1,15 @@
+{
+  "expected_exit_code": 0,
+  "run_args": [
+    "--mode",
+    "normal"
+  ],
+  "env": {
+    "MINI_RECONCILER_ALLOW_DELETIONS": "true"
+  },
+  "covers_clauses": [
+    "MC-DEL-1",
+    "MC-GLOB-1"
+  ],
+  "notes": "Managed files may be removed from a stale unit, but manual.txt must remain."
+}

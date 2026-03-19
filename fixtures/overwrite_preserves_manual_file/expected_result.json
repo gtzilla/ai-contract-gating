@@ -1,0 +1,13 @@
+{
+  "expected_exit_code": 0,
+  "run_args": [
+    "--mode",
+    "normal"
+  ],
+  "env": {},
+  "covers_clauses": [
+    "MC-OVR-1",
+    "MC-GLOB-1"
+  ],
+  "notes": "Managed files are updated, but manual.txt must remain unchanged."
+}
