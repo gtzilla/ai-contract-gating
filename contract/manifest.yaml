@@ -1,0 +1,54 @@
+manifest_version: "0.2"
+
+contract:
+  contract_id: "mini-reconciler-convergence"
+  contract_version: "0.2"
+  contract_file: "contract/contract-v0.2.md"
+
+policy:
+  fail_on_block: true
+
+clauses:
+  - clause_id: "MC-DEL-1"
+    title: "Delete preserves manual.txt"
+    severity: "BLOCK"
+    check:
+      type: "fixture"
+      fixture_id: "delete_preserves_manual_file"
+
+  - clause_id: "MC-OVR-1"
+    title: "Overwrite preserves manual.txt"
+    severity: "BLOCK"
+    check:
+      type: "fixture"
+      fixture_id: "overwrite_preserves_manual_file"
+
+  - clause_id: "MC-RST-1"
+    title: "Reset preserves manual.txt"
+    severity: "BLOCK"
+    check:
+      type: "fixture"
+      fixture_id: "reset_preserves_manual_file"
+
+  - clause_id: "MC-POL-1"
+    title: "Stale units block when deletions are disabled"
+    severity: "BLOCK"
+    check:
+      type: "fixture"
+      fixture_id: "stale_unit_blocked_when_deletions_disabled"
+
+  - clause_id: "MC-GLOB-1"
+    title: "Manual preservation is a global cross-surface invariant"
+    severity: "BLOCK"
+    check:
+      type: "aggregate"
+      requires:
+        - "MC-DEL-1"
+        - "MC-OVR-1"
+        - "MC-RST-1"
+
+fixtures:
+  - fixture_id: "delete_preserves_manual_file"
+  - fixture_id: "overwrite_preserves_manual_file"
+  - fixture_id: "reset_preserves_manual_file"
+  - fixture_id: "stale_unit_blocked_when_deletions_disabled"
