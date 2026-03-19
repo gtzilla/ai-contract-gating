@@ -21,13 +21,14 @@ class ReconcileError(Exception):
 def normalize_doc_content(content: str) -> str:
     return content if content.endswith("\n") else content + "\n"
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Mini Reconciler proof-of-concept")
     parser.add_argument(
         "--mode",
         choices=("normal", "reset"),
         default="normal",
-        help="Execution mode. Reset still preserves manual files.",
+        help="Execution mode. Reset preserves manual files while rebuilding managed files.",
     )
     return parser.parse_args()
 
@@ -118,11 +119,15 @@ def write_managed_files(unit_dir: Path, unit_id: str, content: str) -> None:
     write_text_atomically(unit_dir / "meta.json", build_meta_json(unit_id))
 
 
-def remove_stale_managed_files_only(unit_dir: Path) -> None:
+def remove_managed_files_only(unit_dir: Path) -> None:
     for filename in MANAGED_FILES:
         path = unit_dir / filename
         if path.exists():
             path.unlink()
+
+
+def remove_stale_managed_files_only(unit_dir: Path) -> None:
+    remove_managed_files_only(unit_dir)
 
     # Remove the unit directory only if it is now empty.
     try:
@@ -131,10 +136,31 @@ def remove_stale_managed_files_only(unit_dir: Path) -> None:
         unit_dir.rmdir()
 
 
-def apply_desired_units(desired: Dict[str, str], out_root: Path) -> None:
+def ensure_stale_units_allowed(existing: Dict[str, Path], desired: Dict[str, str]) -> None:
+    stale_ids = sorted(set(existing) - set(desired))
+    if stale_ids and not is_deletions_enabled():
+        stale_list = ", ".join(stale_ids)
+        raise ReconcileError(
+            f"Stale units exist while deletions are disabled: {stale_list}"
+        )
+
+
+def apply_desired_units_normal(desired: Dict[str, str], out_root: Path) -> None:
     for unit_id, content in desired.items():
         unit_dir = out_root / unit_id
         unit_dir.mkdir(parents=True, exist_ok=True)
+        write_managed_files(unit_dir, unit_id, content)
+
+
+def apply_desired_units_reset(desired: Dict[str, str], out_root: Path) -> None:
+    for unit_id, content in desired.items():
+        unit_dir = out_root / unit_id
+        unit_dir.mkdir(parents=True, exist_ok=True)
+
+        # Explicit reset behavior:
+        # clear only the managed files, preserve any manual files,
+        # then rebuild managed files from desired state.
+        remove_managed_files_only(unit_dir)
         write_managed_files(unit_dir, unit_id, content)
 
 
@@ -155,32 +181,17 @@ def handle_stale_units(existing: Dict[str, Path], desired: Dict[str, str]) -> No
 
 def run_normal_mode(desired: Dict[str, str], out_root: Path) -> None:
     existing = existing_unit_dirs(out_root)
+    ensure_stale_units_allowed(existing, desired)
 
-    # Fail before changing anything if stale units exist and deletions are disabled.
-    stale_ids = sorted(set(existing) - set(desired))
-    if stale_ids and not is_deletions_enabled():
-        stale_list = ", ".join(stale_ids)
-        raise ReconcileError(
-            f"Stale units exist while deletions are disabled: {stale_list}"
-        )
-
-    apply_desired_units(desired, out_root)
+    apply_desired_units_normal(desired, out_root)
     handle_stale_units(existing_unit_dirs(out_root), desired)
 
 
 def run_reset_mode(desired: Dict[str, str], out_root: Path) -> None:
-    # v0 reset mode is an explicit mutation surface, but it still preserves manual files
-    # by only rewriting the managed files in each desired unit directory.
     existing = existing_unit_dirs(out_root)
+    ensure_stale_units_allowed(existing, desired)
 
-    stale_ids = sorted(set(existing) - set(desired))
-    if stale_ids and not is_deletions_enabled():
-        stale_list = ", ".join(stale_ids)
-        raise ReconcileError(
-            f"Stale units exist while deletions are disabled: {stale_list}"
-        )
-
-    apply_desired_units(desired, out_root)
+    apply_desired_units_reset(desired, out_root)
     handle_stale_units(existing_unit_dirs(out_root), desired)
 
 
