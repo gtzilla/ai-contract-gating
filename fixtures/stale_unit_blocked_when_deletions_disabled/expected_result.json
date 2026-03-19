@@ -1,0 +1,12 @@
+{
+  "expected_exit_code": 1,
+  "run_args": [
+    "--mode",
+    "normal"
+  ],
+  "env": {},
+  "covers_clauses": [
+    "MC-POL-1"
+  ],
+  "notes": "A stale unit exists while deletions are disabled. The run must fail and out/ must remain unchanged."
+}
