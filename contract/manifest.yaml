@@ -10,32 +10,32 @@ policy:
 
 clauses:
   - clause_id: "MC-DEL-1"
-    title: "Delete preserves manual.txt"
+    title: "Delete preserves manual files"
     severity: "BLOCK"
     check:
       type: "fixture"
-      fixture_id: "delete_preserves_manual_file"
+      fixture_id: "delete_preserves_manual"
 
   - clause_id: "MC-OVR-1"
-    title: "Overwrite preserves manual.txt"
+    title: "Overwrite preserves manual files"
     severity: "BLOCK"
     check:
       type: "fixture"
-      fixture_id: "overwrite_preserves_manual_file"
+      fixture_id: "overwrite_preserves_manual"
 
   - clause_id: "MC-RST-1"
-    title: "Reset preserves manual.txt"
+    title: "Reset preserves manual files"
     severity: "BLOCK"
     check:
       type: "fixture"
-      fixture_id: "reset_preserves_manual_file"
+      fixture_id: "reset_preserves_manual"
 
-  - clause_id: "MC-POL-1"
+  - clause_id: "MC-STALE-1"
     title: "Stale units block when deletions are disabled"
     severity: "BLOCK"
     check:
       type: "fixture"
-      fixture_id: "stale_unit_blocked_when_deletions_disabled"
+      fixture_id: "stale_blocked_when_deletions_disabled"
 
   - clause_id: "MC-GLOB-1"
     title: "Manual preservation is a global cross-surface invariant"
@@ -48,7 +48,7 @@ clauses:
         - "MC-RST-1"
 
 fixtures:
-  - fixture_id: "delete_preserves_manual_file"
-  - fixture_id: "overwrite_preserves_manual_file"
-  - fixture_id: "reset_preserves_manual_file"
-  - fixture_id: "stale_unit_blocked_when_deletions_disabled"
+  - fixture_id: "delete_preserves_manual"
+  - fixture_id: "overwrite_preserves_manual"
+  - fixture_id: "reset_preserves_manual"
+  - fixture_id: "stale_blocked_when_deletions_disabled"
