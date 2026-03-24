@@ -54,3 +54,6 @@ jobs:
       - name: Enforce contract gate result
         if: always()
         run: |
+          if [ "${{ steps.contract_check.outcome }}" != "success" ]; then
+            exit 1
+          fi

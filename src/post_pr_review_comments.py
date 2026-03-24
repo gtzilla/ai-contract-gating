@@ -165,7 +165,11 @@ def choose_commentable_paths(files: list[dict[str, Any]]) -> list[str]:
     return []
 
 
-def get_existing_gate_comments(repo: str, pull_number: int, token: str) -> list[dict[str, Any]]:
+def get_existing_gate_comments(
+    repo: str,
+    pull_number: int,
+    token: str,
+) -> list[dict[str, Any]]:
     comments = paginate(f"{API_BASE}/repos/{repo}/pulls/{pull_number}/comments", token)
     return [
         comment
@@ -184,6 +188,12 @@ def summarize_sequence(values: list[str], empty_label: str) -> str:
     return ", ".join(f"`{value}`" for value in values)
 
 
+def normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 def build_comment_body(summary: dict[str, Any]) -> str:
     clauses = summary.get("clauses", [])
     if not isinstance(clauses, list):
@@ -195,6 +205,13 @@ def build_comment_body(summary: dict[str, Any]) -> str:
         if isinstance(entry, dict)
         and entry.get("result") == "FAIL"
         and entry.get("source") == "fixture"
+    ]
+    aggregate_failures = [
+        entry
+        for entry in clauses
+        if isinstance(entry, dict)
+        and entry.get("result") == "FAIL"
+        and entry.get("source") == "aggregate"
     ]
 
     lines = [
@@ -213,19 +230,50 @@ def build_comment_body(summary: dict[str, Any]) -> str:
             diagnostics = entry.get("diagnostics", {})
             if not isinstance(diagnostics, dict):
                 diagnostics = {}
+
+            missing_paths = normalize_string_list(diagnostics.get("missing_paths"))
+            unexpected_paths = normalize_string_list(diagnostics.get("unexpected_paths"))
+            changed_files = normalize_string_list(diagnostics.get("changed_files"))
+            stderr = diagnostics.get("stderr", "")
+
             lines.extend(
                 [
                     f"- **{entry.get('clause_id', 'UNKNOWN')}** (`{entry.get('fixture', 'unknown-fixture')}`)",
-                    f"  - missing_paths: {summarize_sequence(diagnostics.get('missing_paths', []) if isinstance(diagnostics.get('missing_paths', []), list) else [], 'none')}",
-                    f"  - unexpected_paths: {summarize_sequence(diagnostics.get('unexpected_paths', []) if isinstance(diagnostics.get('unexpected_paths', []), list) else [], 'none')}",
-                    f"  - changed_files: {summarize_sequence(diagnostics.get('changed_files', []) if isinstance(diagnostics.get('changed_files', []), list) else [], 'none')}",
+                    f"  - missing_paths: {summarize_sequence(missing_paths, 'none')}",
+                    f"  - unexpected_paths: {summarize_sequence(unexpected_paths, 'none')}",
+                    f"  - changed_files: {summarize_sequence(changed_files, 'none')}",
                 ]
             )
+            if isinstance(stderr, str) and stderr.strip():
+                compact_stderr = " ".join(stderr.strip().splitlines())
+                lines.append(f"  - stderr: `{compact_stderr[:220]}`")
+
+    if aggregate_failures:
+        lines.extend(["", "**Failed aggregate clauses**", ""])
+        for entry in aggregate_failures:
+            depends_on = normalize_string_list(entry.get("depends_on"))
+            lines.append(
+                f"- **{entry.get('clause_id', 'UNKNOWN')}** depends on {summarize_sequence(depends_on, 'none')}"
+            )
+
+    lines.extend(
+        [
+            "",
+            "This comment is attached to a changed file in the implementation surface so reviewers can jump directly into the affected code area.",
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def create_file_comment(repo: str, pull_number: int, head_sha: str, path: str, body: str, token: str) -> None:
+def create_file_comment(
+    repo: str,
+    pull_number: int,
+    head_sha: str,
+    path: str,
+    body: str,
+    token: str,
+) -> None:
     github_request(
         "POST",
         f"{API_BASE}/repos/{repo}/pulls/{pull_number}/comments",
@@ -254,7 +302,32 @@ def main() -> int:
         pull_number, head_sha = get_pull_request_context(event)
         repo = get_repository(event)
 
-        for comment in get_existing_gate_comments(repo, pull_number, token):
+        existing_comments = get_existing_gate_comments(repo, pull_number, token)
+        for comment in existing_comments:
             comment_id = comment.get("id")
             if isinstance(comment_id, int):
                 delete_comment(repo, comment_id, token)
+
+        if summary.get("overall_result") != "FAIL":
+            print("Contract gate passed; no file-scoped rejection comments created.")
+            return 0
+
+        changed_files = get_changed_files(repo, pull_number, token)
+        commentable_paths = choose_commentable_paths(changed_files)
+        if not commentable_paths:
+            print("No changed files available for file-scoped review comments.")
+            return 0
+
+        body = build_comment_body(summary)
+        for path in commentable_paths:
+            create_file_comment(repo, pull_number, head_sha, path, body, token)
+            print(f"Created contract gate file comment on {path}")
+
+        return 0
+    except ReviewCommentError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
