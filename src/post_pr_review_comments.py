@@ -9,8 +9,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUMMARY_PATH = REPO_ROOT / "artifacts" / "check_contract_summary.json"
+MANIFEST_PATH = REPO_ROOT / "contract" / "manifest.yaml"
 API_BASE = "https://api.github.com"
 API_VERSION = "2022-11-28"
 COMMENT_MARKER = "<!-- contract-gate-file-comment -->"
@@ -194,7 +197,53 @@ def normalize_string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
-def build_comment_body(summary: dict[str, Any]) -> str:
+def load_manifest_metadata() -> tuple[str, dict[str, str]]:
+    if not MANIFEST_PATH.exists():
+        raise ReviewCommentError(f"Missing manifest: {MANIFEST_PATH}")
+
+    try:
+        payload = yaml.safe_load(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ReviewCommentError(f"Invalid YAML in {MANIFEST_PATH}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ReviewCommentError("Manifest must contain a top-level object.")
+
+    contract = payload.get("contract")
+    if not isinstance(contract, dict):
+        raise ReviewCommentError("Manifest missing contract block.")
+
+    contract_file = contract.get("contract_file")
+    if not isinstance(contract_file, str) or not contract_file.strip():
+        raise ReviewCommentError("Manifest missing contract.contract_file.")
+
+    clauses = payload.get("clauses")
+    if not isinstance(clauses, list):
+        raise ReviewCommentError("Manifest clauses must be a list.")
+
+    clause_titles: dict[str, str] = {}
+    for clause in clauses:
+        if not isinstance(clause, dict):
+            continue
+        clause_id = clause.get("clause_id")
+        title = clause.get("title")
+        if isinstance(clause_id, str) and clause_id.strip() and isinstance(title, str) and title.strip():
+            clause_titles[clause_id] = title
+
+    return contract_file, clause_titles
+
+
+def build_contract_url(repo: str, head_sha: str, contract_file: str) -> str:
+    return f"https://github.com/{repo}/blob/{head_sha}/{contract_file}"
+
+
+def build_comment_body(
+    summary: dict[str, Any],
+    repo: str,
+    head_sha: str,
+    contract_file: str,
+    clause_titles: dict[str, str],
+) -> str:
     clauses = summary.get("clauses", [])
     if not isinstance(clauses, list):
         raise ReviewCommentError("Summary clauses must be a list.")
@@ -214,12 +263,17 @@ def build_comment_body(summary: dict[str, Any]) -> str:
         and entry.get("source") == "aggregate"
     ]
 
+    contract_url = build_contract_url(repo, head_sha, contract_file)
+
     lines = [
         COMMENT_MARKER,
         "Contract gate failed for this pull request.",
         "",
         "This is a file-scoped review comment generated from `check_contract_summary.json`.",
         "It points at the changed implementation surface, not an exact source line.",
+        "",
+        f"Contract under test: [`{contract_file}`]({contract_url})",
+        "In plain English: this PR changed a managed mutation surface, and the contract fixtures detected behavior drift that now needs review against the preserved rules in the contract.",
         "",
         f"- overall_result: **{summary.get('overall_result', 'UNKNOWN')}**",
     ]
@@ -236,9 +290,13 @@ def build_comment_body(summary: dict[str, Any]) -> str:
             changed_files = normalize_string_list(diagnostics.get("changed_files"))
             stderr = diagnostics.get("stderr", "")
 
+            clause_id = entry.get("clause_id", "UNKNOWN")
+            clause_title = clause_titles.get(clause_id)
+            label = f"{clause_id} — {clause_title}" if clause_title else clause_id
+
             lines.extend(
                 [
-                    f"- **{entry.get('clause_id', 'UNKNOWN')}** (`{entry.get('fixture', 'unknown-fixture')}`)",
+                    f"- **{label}** (`{entry.get('fixture', 'unknown-fixture')}`)",
                     f"  - missing_paths: {summarize_sequence(missing_paths, 'none')}",
                     f"  - unexpected_paths: {summarize_sequence(unexpected_paths, 'none')}",
                     f"  - changed_files: {summarize_sequence(changed_files, 'none')}",
@@ -252,8 +310,11 @@ def build_comment_body(summary: dict[str, Any]) -> str:
         lines.extend(["", "**Failed aggregate clauses**", ""])
         for entry in aggregate_failures:
             depends_on = normalize_string_list(entry.get("depends_on"))
+            clause_id = entry.get("clause_id", "UNKNOWN")
+            clause_title = clause_titles.get(clause_id)
+            label = f"{clause_id} — {clause_title}" if clause_title else clause_id
             lines.append(
-                f"- **{entry.get('clause_id', 'UNKNOWN')}** depends on {summarize_sequence(depends_on, 'none')}"
+                f"- **{label}** depends on {summarize_sequence(depends_on, 'none')}"
             )
 
     lines.extend(
@@ -294,6 +355,7 @@ def main() -> int:
             raise ReviewCommentError("GITHUB_TOKEN is required.")
 
         summary = load_json_object(SUMMARY_PATH, "contract summary")
+        contract_file, clause_titles = load_manifest_metadata()
         event_path = os.environ.get("GITHUB_EVENT_PATH")
         if not event_path:
             raise ReviewCommentError("GITHUB_EVENT_PATH is required.")
@@ -318,7 +380,7 @@ def main() -> int:
             print("No changed files available for file-scoped review comments.")
             return 0
 
-        body = build_comment_body(summary)
+        body = build_comment_body(summary, repo, head_sha, contract_file, clause_titles)
         for path in commentable_paths:
             create_file_comment(repo, pull_number, head_sha, path, body, token)
             print(f"Created contract gate file comment on {path}")
