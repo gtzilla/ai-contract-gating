@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -191,18 +192,55 @@ def summarize_sequence(values: list[str], empty_label: str) -> str:
     return ", ".join(f"`{value}`" for value in values)
 
 
+def summarize_markdown_sequence(values: list[str], empty_label: str) -> str:
+    if not values:
+        return empty_label
+    return ", ".join(values)
+
+
 def normalize_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
 
 
-def load_manifest_metadata() -> tuple[str, dict[str, str]]:
+def find_manifest_clause_ranges(manifest_text: str) -> dict[str, tuple[int, int]]:
+    lines = manifest_text.splitlines()
+    clause_starts: list[tuple[str, int]] = []
+
+    for line_number, line in enumerate(lines, start=1):
+        match = re.match(r'^\s*-\s+clause_id:\s+"([^"]+)"\s*$', line)
+        if match:
+            clause_starts.append((match.group(1), line_number))
+
+    ranges: dict[str, tuple[int, int]] = {}
+    for index, (clause_id, start_line) in enumerate(clause_starts):
+        if index + 1 < len(clause_starts):
+            end_line = clause_starts[index + 1][1] - 1
+        else:
+            end_line = len(lines)
+            for line_number in range(start_line + 1, len(lines) + 1):
+                line = lines[line_number - 1]
+                if re.match(r'^[A-Za-z_][A-Za-z0-9_-]*:\s*$', line):
+                    end_line = line_number - 1
+                    break
+
+        while end_line >= start_line and not lines[end_line - 1].strip():
+            end_line -= 1
+
+        ranges[clause_id] = (start_line, max(start_line, end_line))
+
+    return ranges
+
+
+def load_manifest_metadata() -> tuple[str, dict[str, str], dict[str, tuple[int, int]]]:
     if not MANIFEST_PATH.exists():
         raise ReviewCommentError(f"Missing manifest: {MANIFEST_PATH}")
 
+    manifest_text = MANIFEST_PATH.read_text(encoding="utf-8")
+
     try:
-        payload = yaml.safe_load(MANIFEST_PATH.read_text(encoding="utf-8"))
+        payload = yaml.safe_load(manifest_text)
     except yaml.YAMLError as exc:
         raise ReviewCommentError(f"Invalid YAML in {MANIFEST_PATH}: {exc}") from exc
 
@@ -230,11 +268,49 @@ def load_manifest_metadata() -> tuple[str, dict[str, str]]:
         if isinstance(clause_id, str) and clause_id.strip() and isinstance(title, str) and title.strip():
             clause_titles[clause_id] = title
 
-    return contract_file, clause_titles
+    clause_ranges = find_manifest_clause_ranges(manifest_text)
+    return contract_file, clause_titles, clause_ranges
+
+
+def build_blob_url(repo: str, head_sha: str, path: str) -> str:
+    return f"https://github.com/{repo}/blob/{head_sha}/{path}"
 
 
 def build_contract_url(repo: str, head_sha: str, contract_file: str) -> str:
-    return f"https://github.com/{repo}/blob/{head_sha}/{contract_file}"
+    return build_blob_url(repo, head_sha, contract_file)
+
+
+def build_manifest_url(repo: str, head_sha: str) -> str:
+    return build_blob_url(repo, head_sha, MANIFEST_PATH.relative_to(REPO_ROOT).as_posix())
+
+
+def build_manifest_clause_url(
+    repo: str,
+    head_sha: str,
+    clause_id: str,
+    clause_ranges: dict[str, tuple[int, int]],
+) -> str | None:
+    line_range = clause_ranges.get(clause_id)
+    if line_range is None:
+        return None
+
+    start_line, end_line = line_range
+    return f"{build_manifest_url(repo, head_sha)}#L{start_line}-L{end_line}"
+
+
+def format_clause_reference(
+    clause_id: str,
+    clause_titles: dict[str, str],
+    repo: str,
+    head_sha: str,
+    clause_ranges: dict[str, tuple[int, int]],
+) -> str:
+    clause_title = clause_titles.get(clause_id)
+    label = f"{clause_id} — {clause_title}" if clause_title else clause_id
+    clause_url = build_manifest_clause_url(repo, head_sha, clause_id, clause_ranges)
+    if clause_url is None:
+        return label
+    return f"[{label}]({clause_url})"
 
 
 def build_comment_body(
@@ -243,6 +319,7 @@ def build_comment_body(
     head_sha: str,
     contract_file: str,
     clause_titles: dict[str, str],
+    clause_ranges: dict[str, tuple[int, int]],
 ) -> str:
     clauses = summary.get("clauses", [])
     if not isinstance(clauses, list):
@@ -264,6 +341,8 @@ def build_comment_body(
     ]
 
     contract_url = build_contract_url(repo, head_sha, contract_file)
+    manifest_rel_path = MANIFEST_PATH.relative_to(REPO_ROOT).as_posix()
+    manifest_url = build_manifest_url(repo, head_sha)
 
     lines = [
         COMMENT_MARKER,
@@ -273,6 +352,7 @@ def build_comment_body(
         "It points at the changed implementation surface, not an exact source line.",
         "",
         f"Contract under test: [`{contract_file}`]({contract_url})",
+        f"Manifest under test: [`{manifest_rel_path}`]({manifest_url})",
         "In plain English: this PR changed a managed mutation surface, and the contract fixtures detected behavior drift that now needs review against the preserved rules in the contract.",
         "",
         f"- overall_result: **{summary.get('overall_result', 'UNKNOWN')}**",
@@ -291,12 +371,17 @@ def build_comment_body(
             stderr = diagnostics.get("stderr", "")
 
             clause_id = entry.get("clause_id", "UNKNOWN")
-            clause_title = clause_titles.get(clause_id)
-            label = f"{clause_id} — {clause_title}" if clause_title else clause_id
+            clause_reference = format_clause_reference(
+                clause_id,
+                clause_titles,
+                repo,
+                head_sha,
+                clause_ranges,
+            )
 
             lines.extend(
                 [
-                    f"- **{label}** (`{entry.get('fixture', 'unknown-fixture')}`)",
+                    f"- **{clause_reference}** (`{entry.get('fixture', 'unknown-fixture')}`)",
                     f"  - missing_paths: {summarize_sequence(missing_paths, 'none')}",
                     f"  - unexpected_paths: {summarize_sequence(unexpected_paths, 'none')}",
                     f"  - changed_files: {summarize_sequence(changed_files, 'none')}",
@@ -311,10 +396,25 @@ def build_comment_body(
         for entry in aggregate_failures:
             depends_on = normalize_string_list(entry.get("depends_on"))
             clause_id = entry.get("clause_id", "UNKNOWN")
-            clause_title = clause_titles.get(clause_id)
-            label = f"{clause_id} — {clause_title}" if clause_title else clause_id
+            clause_reference = format_clause_reference(
+                clause_id,
+                clause_titles,
+                repo,
+                head_sha,
+                clause_ranges,
+            )
+            dependency_references = [
+                format_clause_reference(
+                    dependency,
+                    clause_titles,
+                    repo,
+                    head_sha,
+                    clause_ranges,
+                )
+                for dependency in depends_on
+            ]
             lines.append(
-                f"- **{label}** depends on {summarize_sequence(depends_on, 'none')}"
+                f"- **{clause_reference}** depends on {summarize_markdown_sequence(dependency_references, 'none')}"
             )
 
     lines.extend(
@@ -355,7 +455,7 @@ def main() -> int:
             raise ReviewCommentError("GITHUB_TOKEN is required.")
 
         summary = load_json_object(SUMMARY_PATH, "contract summary")
-        contract_file, clause_titles = load_manifest_metadata()
+        contract_file, clause_titles, clause_ranges = load_manifest_metadata()
         event_path = os.environ.get("GITHUB_EVENT_PATH")
         if not event_path:
             raise ReviewCommentError("GITHUB_EVENT_PATH is required.")
@@ -380,7 +480,7 @@ def main() -> int:
             print("No changed files available for file-scoped review comments.")
             return 0
 
-        body = build_comment_body(summary, repo, head_sha, contract_file, clause_titles)
+        body = build_comment_body(summary, repo, head_sha, contract_file, clause_titles, clause_ranges)
         for path in commentable_paths:
             create_file_comment(repo, pull_number, head_sha, path, body, token)
             print(f"Created contract gate file comment on {path}")
