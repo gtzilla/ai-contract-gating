@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -204,13 +205,16 @@ def find_clause_line_ranges(manifest_text: str, clause_ids: list[str]) -> dict[s
     lines = manifest_text.splitlines()
     found_starts: list[tuple[str, int]] = []
     wanted = {clause_id for clause_id in clause_ids if clause_id}
+    clause_id_pattern = re.compile(r"^-?\s*clause_id:\s*['\"]([^'\"]+)['\"]\s*$")
 
     for index, raw_line in enumerate(lines, start=1):
         stripped = raw_line.strip()
-        for clause_id in wanted:
-            if stripped == f'clause_id: "{clause_id}"':
-                found_starts.append((clause_id, index))
-                break
+        match = clause_id_pattern.match(stripped)
+        if not match:
+            continue
+        clause_id = match.group(1)
+        if clause_id in wanted:
+            found_starts.append((clause_id, index))
 
     found_starts.sort(key=lambda item: item[1])
     clause_ranges: dict[str, tuple[int, int]] = {}
