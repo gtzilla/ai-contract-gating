@@ -14,6 +14,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUMMARY_PATH = REPO_ROOT / "artifacts" / "check_contract_summary.json"
 MANIFEST_PATH = REPO_ROOT / "contract" / "manifest.yaml"
+MANIFEST_REPO_PATH = "contract/manifest.yaml"
 API_BASE = "https://api.github.com"
 API_VERSION = "2022-11-28"
 COMMENT_MARKER = "<!-- contract-gate-file-comment -->"
@@ -185,10 +186,12 @@ def delete_comment(repo: str, comment_id: int, token: str) -> None:
     github_request("DELETE", f"{API_BASE}/repos/{repo}/pulls/comments/{comment_id}", token)
 
 
-def summarize_sequence(values: list[str], empty_label: str) -> str:
+def summarize_sequence(values: list[str], empty_label: str, *, code_style: bool = True) -> str:
     if not values:
         return empty_label
-    return ", ".join(f"`{value}`" for value in values)
+    if code_style:
+        return ", ".join(f"`{value}`" for value in values)
+    return ", ".join(values)
 
 
 def normalize_string_list(value: Any) -> list[str]:
@@ -197,12 +200,42 @@ def normalize_string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
-def load_manifest_metadata() -> tuple[str, dict[str, str]]:
+def find_clause_line_ranges(manifest_text: str, clause_ids: list[str]) -> dict[str, tuple[int, int]]:
+    lines = manifest_text.splitlines()
+    found_starts: list[tuple[str, int]] = []
+    wanted = {clause_id for clause_id in clause_ids if clause_id}
+
+    for index, raw_line in enumerate(lines, start=1):
+        stripped = raw_line.strip()
+        for clause_id in wanted:
+            if stripped == f'clause_id: "{clause_id}"':
+                found_starts.append((clause_id, index))
+                break
+
+    found_starts.sort(key=lambda item: item[1])
+    clause_ranges: dict[str, tuple[int, int]] = {}
+    for position, (clause_id, start_line) in enumerate(found_starts):
+        if position + 1 < len(found_starts):
+            end_line = found_starts[position + 1][1] - 1
+        else:
+            end_line = len(lines)
+            for index in range(start_line, len(lines) + 1):
+                if lines[index - 1].strip().startswith("fixtures:"):
+                    end_line = index - 1
+                    break
+        clause_ranges[clause_id] = (start_line, max(start_line, end_line))
+
+    return clause_ranges
+
+
+def load_manifest_metadata() -> tuple[str, dict[str, str], dict[str, tuple[int, int]]]:
     if not MANIFEST_PATH.exists():
         raise ReviewCommentError(f"Missing manifest: {MANIFEST_PATH}")
 
+    manifest_text = MANIFEST_PATH.read_text(encoding="utf-8")
+
     try:
-        payload = yaml.safe_load(MANIFEST_PATH.read_text(encoding="utf-8"))
+        payload = yaml.safe_load(manifest_text)
     except yaml.YAMLError as exc:
         raise ReviewCommentError(f"Invalid YAML in {MANIFEST_PATH}: {exc}") from exc
 
@@ -222,19 +255,62 @@ def load_manifest_metadata() -> tuple[str, dict[str, str]]:
         raise ReviewCommentError("Manifest clauses must be a list.")
 
     clause_titles: dict[str, str] = {}
+    clause_ids: list[str] = []
     for clause in clauses:
         if not isinstance(clause, dict):
             continue
         clause_id = clause.get("clause_id")
         title = clause.get("title")
-        if isinstance(clause_id, str) and clause_id.strip() and isinstance(title, str) and title.strip():
-            clause_titles[clause_id] = title
+        if isinstance(clause_id, str) and clause_id.strip():
+            clause_ids.append(clause_id)
+            if isinstance(title, str) and title.strip():
+                clause_titles[clause_id] = title
 
-    return contract_file, clause_titles
+    clause_line_ranges = find_clause_line_ranges(manifest_text, clause_ids)
+    return contract_file, clause_titles, clause_line_ranges
+
+
+def build_repo_blob_url(repo: str, head_sha: str, repo_path: str) -> str:
+    return f"https://github.com/{repo}/blob/{head_sha}/{repo_path}"
 
 
 def build_contract_url(repo: str, head_sha: str, contract_file: str) -> str:
-    return f"https://github.com/{repo}/blob/{head_sha}/{contract_file}"
+    return build_repo_blob_url(repo, head_sha, contract_file)
+
+
+def build_manifest_url(repo: str, head_sha: str) -> str:
+    return build_repo_blob_url(repo, head_sha, MANIFEST_REPO_PATH)
+
+
+def build_clause_manifest_url(
+    repo: str,
+    head_sha: str,
+    clause_id: str,
+    clause_line_ranges: dict[str, tuple[int, int]],
+) -> str | None:
+    line_range = clause_line_ranges.get(clause_id)
+    if not line_range:
+        return None
+    start_line, end_line = line_range
+    base_url = build_manifest_url(repo, head_sha)
+    if start_line == end_line:
+        return f"{base_url}#L{start_line}"
+    return f"{base_url}#L{start_line}-L{end_line}"
+
+
+def format_clause_label(
+    clause_id: str,
+    clause_titles: dict[str, str],
+    repo: str,
+    head_sha: str,
+    clause_line_ranges: dict[str, tuple[int, int]],
+) -> str:
+    clause_title = clause_titles.get(clause_id)
+    label_text = f"{clause_id} — {clause_title}" if clause_title else clause_id
+    clause_url = build_clause_manifest_url(repo, head_sha, clause_id, clause_line_ranges)
+    if clause_url:
+        return f"[{label_text}]({clause_url})"
+    return label_text
 
 
 def build_comment_body(
@@ -243,6 +319,7 @@ def build_comment_body(
     head_sha: str,
     contract_file: str,
     clause_titles: dict[str, str],
+    clause_line_ranges: dict[str, tuple[int, int]],
 ) -> str:
     clauses = summary.get("clauses", [])
     if not isinstance(clauses, list):
@@ -264,6 +341,7 @@ def build_comment_body(
     ]
 
     contract_url = build_contract_url(repo, head_sha, contract_file)
+    manifest_url = build_manifest_url(repo, head_sha)
 
     lines = [
         COMMENT_MARKER,
@@ -273,7 +351,8 @@ def build_comment_body(
         "It points at the changed implementation surface, not an exact source line.",
         "",
         f"Contract under test: [`{contract_file}`]({contract_url})",
-        "In plain English: this PR changed a managed mutation surface, and the contract fixtures detected behavior drift that now needs review against the preserved rules in the contract.",
+        f"Manifest under test: [`{MANIFEST_REPO_PATH}`]({manifest_url})",
+        "In plain English: this PR changed a managed mutation surface, and the contract fixtures detected behavior drift that now needs review against the preserved rules in the contract and manifest.",
         "",
         f"- overall_result: **{summary.get('overall_result', 'UNKNOWN')}**",
     ]
@@ -291,8 +370,13 @@ def build_comment_body(
             stderr = diagnostics.get("stderr", "")
 
             clause_id = entry.get("clause_id", "UNKNOWN")
-            clause_title = clause_titles.get(clause_id)
-            label = f"{clause_id} — {clause_title}" if clause_title else clause_id
+            label = format_clause_label(
+                clause_id,
+                clause_titles,
+                repo,
+                head_sha,
+                clause_line_ranges,
+            )
 
             lines.extend(
                 [
@@ -311,10 +395,25 @@ def build_comment_body(
         for entry in aggregate_failures:
             depends_on = normalize_string_list(entry.get("depends_on"))
             clause_id = entry.get("clause_id", "UNKNOWN")
-            clause_title = clause_titles.get(clause_id)
-            label = f"{clause_id} — {clause_title}" if clause_title else clause_id
+            label = format_clause_label(
+                clause_id,
+                clause_titles,
+                repo,
+                head_sha,
+                clause_line_ranges,
+            )
+            linked_dependencies = [
+                format_clause_label(
+                    dependency,
+                    clause_titles,
+                    repo,
+                    head_sha,
+                    clause_line_ranges,
+                )
+                for dependency in depends_on
+            ]
             lines.append(
-                f"- **{label}** depends on {summarize_sequence(depends_on, 'none')}"
+                f"- **{label}** depends on {summarize_sequence(linked_dependencies, 'none', code_style=False)}"
             )
 
     lines.extend(
@@ -355,7 +454,7 @@ def main() -> int:
             raise ReviewCommentError("GITHUB_TOKEN is required.")
 
         summary = load_json_object(SUMMARY_PATH, "contract summary")
-        contract_file, clause_titles = load_manifest_metadata()
+        contract_file, clause_titles, clause_line_ranges = load_manifest_metadata()
         event_path = os.environ.get("GITHUB_EVENT_PATH")
         if not event_path:
             raise ReviewCommentError("GITHUB_EVENT_PATH is required.")
@@ -380,7 +479,14 @@ def main() -> int:
             print("No changed files available for file-scoped review comments.")
             return 0
 
-        body = build_comment_body(summary, repo, head_sha, contract_file, clause_titles)
+        body = build_comment_body(
+            summary,
+            repo,
+            head_sha,
+            contract_file,
+            clause_titles,
+            clause_line_ranges,
+        )
         for path in commentable_paths:
             create_file_comment(repo, pull_number, head_sha, path, body, token)
             print(f"Created contract gate file comment on {path}")
